@@ -1,0 +1,13 @@
+[build]
+  publish = "public"
+  # No build step — the UI is a static file, the API is an edge function.
+
+[[edge_functions]]
+  path = "/api/probe"
+  function = "probe"
+
+[[headers]]
+  for = "/*"
+  [headers.values]
+    X-Content-Type-Options = "nosniff"
+    Referrer-Policy = "no-referrer"

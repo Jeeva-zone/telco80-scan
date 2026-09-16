@@ -1,0 +1,12 @@
+name = "telco80-scan"
+main = "port80-worker.js"
+compatibility_date = "2026-09-17"
+
+# Optional: set after your first deploy to attach a custom domain / route.
+# routes = [
+#   { pattern = "scan.example.com", custom_domain = true }
+# ]
+
+[vars]
+# Nothing secret here — the scanner takes no credentials by design.
+SCANNER_NAME = "port80-scanner"

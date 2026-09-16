@@ -1,0 +1,25 @@
+{
+  "name": "telco80-scan",
+  "version": "1.0.0",
+  "private": true,
+  "type": "module",
+  "description": "Port-80 reachability scanner. One-file edge function for Cloudflare Workers, Vercel Edge and Netlify Edge. Zero dependencies.",
+  "keywords": [
+    "port-scanner",
+    "cloudflare-workers",
+    "vercel-edge",
+    "netlify-edge",
+    "port80",
+    "uptime",
+    "reachability"
+  ],
+  "license": "MIT",
+  "scripts": {
+    "dev": "npx wrangler dev port80-worker.js",
+    "deploy": "npx wrangler deploy port80-worker.js",
+    "smoke": "node scripts/smoke.mjs"
+  },
+  "engines": {
+    "node": ">=18"
+  }
+}

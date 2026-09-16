@@ -1,0 +1,309 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>port80 scanner</title>
+<style>
+  :root{
+    --bg:#ffffff; --fg:#0a0a0a; --muted:#737373; --border:#e5e5e5;
+    --primary:#0a0a0a; --primary-fg:#fafafa; --ok:#10b981; --bad:#dc2626;
+  }
+  *{box-sizing:border-box}
+  body{margin:0;background:var(--bg);color:var(--fg);
+       font-family:ui-sans-serif,system-ui,-apple-system,"Segoe UI",sans-serif;}
+  main{display:flex;min-height:100vh;align-items:center;justify-content:center;padding:24px}
+  .wrap{width:100%;max-width:32rem}
+  .mono{font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  h1{font-size:1.125rem;font-weight:600;margin:0}
+  header p{margin:4px 0 0;font-size:.875rem;color:var(--muted)}
+  .row{display:flex;align-items:center;justify-content:space-between;gap:12px}
+  .group{display:flex;gap:2px;border:1px solid var(--border);border-radius:6px;padding:2px}
+  .group button{border:0;background:transparent;border-radius:4px;padding:4px 8px;
+       font-size:.75rem;font-weight:500;cursor:pointer;color:var(--muted);
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  .group button[aria-pressed="true"]{background:var(--primary);color:var(--primary-fg)}
+  .tabs{display:flex;gap:2px;border:1px solid var(--border);border-radius:6px;padding:4px;margin:24px 0}
+  .tabs button{flex:1;border:0;background:transparent;border-radius:4px;padding:6px 12px;
+       font-size:.875rem;font-weight:500;cursor:pointer;color:var(--muted)}
+  .tabs button[aria-selected="true"]{background:var(--primary);color:var(--primary-fg)}
+  .field{display:flex;gap:8px}
+  input{flex:1;border:1px solid var(--border);background:var(--bg);color:var(--fg);
+       border-radius:6px;padding:8px 12px;font-size:.875rem;outline:none;
+       font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  input:focus{border-color:var(--fg)}
+  .btn{border:1px solid var(--border);background:var(--bg);color:var(--fg);border-radius:6px;
+       padding:8px 16px;font-size:.875rem;font-weight:500;cursor:pointer}
+  .btn-primary{background:var(--primary);color:var(--primary-fg);border-color:var(--primary)}
+  .btn:disabled{opacity:.5;cursor:not-allowed}
+  ul{list-style:none;margin:24px 0 0;padding:0}
+  li{display:flex;align-items:center;justify-content:space-between;gap:12px;
+     border-bottom:1px solid var(--border);padding:6px 0;font-size:.875rem;
+     font-family:ui-monospace,SFMono-Regular,Menlo,Consolas,monospace}
+  li.col{flex-direction:column;align-items:stretch;gap:2px}
+  .dim{color:var(--muted)} .ok{color:var(--ok)} .bad{color:var(--bad)}
+  .sub{font-size:.75rem;color:var(--muted);overflow:hidden;text-overflow:ellipsis;white-space:nowrap}
+  .dot{display:inline-block;width:10px;height:10px;border-radius:50%;background:var(--muted)}
+  .dot.ok{background:var(--ok)} .dot.bad{background:var(--bad)}
+  .note{margin:12px 0 0;font-size:.75rem;color:var(--muted)}
+</style>
+</head>
+<body>
+<main><div class="wrap" id="app"></div></main>
+<script>
+(function(){
+  var app = document.getElementById('app');
+  var TIMEOUT_MS = 3000, TESTS_PER_IP = 5;
+  var LIST_SRC = 'https://raw.githubusercontent.com/Durgaa17/Raam-Public-Vless/refs/heads/main/scaniplist.txt';
+  var LIST_CACHE_KEY = 'sample-ip-list-v1';
+
+  var state = {
+    tab: 'manual', mode: 'online', ip: '',
+    scanning: false, log: [],
+    list: [], listState: 'loading', updating: false,
+    testing: false, progress: 0, results: []
+  };
+
+  var LABELS = {
+    open:      { t: 'REACHABLE',     c: 'ok'  },
+    reachable: { t: 'REACHABLE',     c: 'ok'  },
+    timeout:   { t: 'NO RESPONSE',   c: 'dim' },
+    error:     { t: 'NOT REACHABLE', c: 'bad' }
+  };
+
+  function esc(s){
+    return String(s).replace(/[&<>"']/g, function(c){
+      return { '&':'&amp;', '<':'&lt;', '>':'&gt;', '"':'&quot;', "'":'&#39;' }[c];
+    });
+  }
+
+  /* -- server probe: asks /api/probe to do the real GET and read the status line -- */
+  async function serverProbe(target, timeout){
+    var start = performance.now();
+    var controller = new AbortController();
+    var timer = setTimeout(function(){ controller.abort(); }, timeout + 2000);
+    try{
+      var res = await fetch('/api/probe?target=' + encodeURIComponent(target),
+        { cache:'no-store', signal: controller.signal });
+      clearTimeout(timer);
+      var data = await res.json();
+      var ms = data.ms != null ? data.ms : Math.round(performance.now() - start);
+      if (data.reachable) return { status:'reachable', ms:ms, line:data.line, mode:'server' };
+      return { status: data.status === 'timeout' ? 'timeout' : 'error',
+               ms:ms, line:data.message, mode:'server' };
+    }catch(e){
+      clearTimeout(timer);
+      if (controller.signal.aborted)
+        return { status:'timeout', ms:Math.round(performance.now()-start), mode:'server' };
+      return null; // our own server unreachable -> fall back to device probe
+    }
+  }
+
+  /* -- device probe: runs in the browser, no-cors, no status line readable -- */
+  async function deviceProbe(target, timeout){
+    var start = performance.now();
+    var controller = new AbortController();
+    var timer = setTimeout(function(){ controller.abort(); }, timeout);
+    try{
+      await fetch('http://' + target + ':80/favicon.ico',
+        { mode:'no-cors', cache:'no-store', signal: controller.signal });
+      clearTimeout(timer);
+      return { status:'reachable', ms:Math.round(performance.now()-start),
+               line:'Device probe: host responded (status line not readable offline)',
+               mode:'device' };
+    }catch(e){
+      clearTimeout(timer);
+      return { status: controller.signal.aborted ? 'timeout' : 'error',
+               ms:Math.round(performance.now()-start),
+               line:'Device probe: no response', mode:'device' };
+    }
+  }
+
+  async function probe(target, timeout){
+    if (state.mode === 'online'){
+      var server = await serverProbe(target, timeout);
+      if (server) return server;
+    }
+    return deviceProbe(target, timeout);
+  }
+
+  function parseList(raw){
+    var seen = {}, out = [];
+    raw.split(/\r?\n/).forEach(function(l){
+      l = l.trim();
+      if (l && l.charAt(0) !== '#' && !seen[l]){ seen[l] = 1; out.push(l); }
+    });
+    return out;
+  }
+
+  /* ------------------------------- render ------------------------------- */
+  function render(){
+    var online = state.mode === 'online';
+    var h = '';
+
+    h += '<header><div class="row">';
+    h += '<h1 class="mono">port80 scanner</h1>';
+    h += '<div class="group" role="group" aria-label="Probe mode">';
+    h += '<button data-act="mode-online" aria-pressed="' + online + '">online</button>';
+    h += '<button data-act="mode-offline" aria-pressed="' + (!online) + '">offline</button>';
+    h += '</div></div>';
+    h += '<p>' + (online
+          ? 'Online: server reads the real HTTP status line on port 80.'
+          : 'Offline: on-device ping only — REACHABLE / NOT REACHABLE, no status line.') + '</p>';
+    h += '</header>';
+
+    h += '<div class="tabs" role="tablist">';
+    h += '<button role="tab" data-act="tab-manual" aria-selected="' + (state.tab==='manual') + '">Manual</button>';
+    h += '<button role="tab" data-act="tab-sample" aria-selected="' + (state.tab==='sample') + '">Sample Test</button>';
+    h += '</div>';
+
+    h += (state.tab === 'manual') ? renderManual() : renderSample();
+
+    app.innerHTML = h;
+  }
+
+  function renderManual(){
+    var h = '';
+    h += '<div class="field">';
+    h += '<input id="ip" value="' + esc(state.ip) + '" placeholder="192.168.1.1 or host.example.com"'
+       + ' autocomplete="off" spellcheck="false" aria-label="IP address or hostname">';
+    h += '<button class="btn btn-primary" data-act="scan"' + (state.scanning || !state.ip.trim() ? ' disabled' : '') + '>'
+       + (state.scanning ? 'Scanning…' : 'Scan') + '</button>';
+    h += '</div>';
+
+    h += '<ul>';
+    if (state.log.length === 0) h += '<li class="dim">No scans yet.</li>';
+    state.log.forEach(function(r){
+      var L = LABELS[r.status] || LABELS.error;
+      h += '<li class="col">';
+      h += '<span class="row"><span>' + esc(r.target) + ':80</span>';
+      h += '<span class="row" style="gap:12px"><span class="dim">' + r.ms + 'ms</span>';
+      h += '<span class="' + L.c + '">' + L.t + '</span></span></span>';
+      if (r.line) h += '<span class="sub">' + esc(r.line) + '</span>';
+      h += '</li>';
+    });
+    h += '</ul>';
+    return h;
+  }
+
+  function renderSample(){
+    var ready = state.listState === 'ready' || state.listState === 'cached';
+    var dot = ready ? 'ok' : (state.listState === 'error' ? 'bad' : '');
+    var label = state.listState === 'loading' ? 'Loading list…'
+              : state.listState === 'ready'  ? 'List loaded (' + state.list.length + ')'
+              : state.listState === 'cached' ? 'Cached list (' + state.list.length + ')'
+              : 'List unavailable';
+
+    var h = '';
+    h += '<div class="row">';
+    h += '<span class="row mono" style="gap:8px;font-size:.875rem">';
+    h += '<span class="dot ' + dot + '"></span><span class="' + (ready?'ok':(dot==='bad'?'bad':'dim')) + '">' + esc(label) + '</span>';
+    h += '</span><span class="row" style="gap:8px">';
+    h += '<button class="btn" data-act="update"' + (state.updating||state.testing ? ' disabled':'') + '>'
+       + (state.updating ? 'Updating…' : 'Update') + '</button>';
+    h += '<button class="btn btn-primary" data-act="run"'
+       + (state.testing || !ready || state.list.length === 0 ? ' disabled' : '') + '>'
+       + (state.testing ? 'Testing ' + state.progress + '/' + state.list.length : 'Sample Test') + '</button>';
+    h += '</span></div>';
+
+    h += '<p class="note">Each entry is probed on port 80, ' + TESTS_PER_IP + ' times, for accuracy.</p>';
+
+    h += '<ul>';
+    if (state.results.length === 0)
+      h += '<li class="dim">' + (state.testing ? 'Testing…' : 'No results yet.') + '</li>';
+    state.results.forEach(function(r){
+      var good = r.success > 0;
+      h += '<li><span>' + esc(r.target) + ':80</span>';
+      h += '<span class="row" style="gap:12px"><span class="dim">' + (good ? r.avgMs + 'ms' : '—') + '</span>';
+      h += '<span class="' + (good ? 'ok' : 'dim') + '">' + r.success + '/' + r.total + '</span></span></li>';
+    });
+    h += '</ul>';
+    return h;
+  }
+
+  /* ------------------------------ actions ------------------------------ */
+  async function doScan(){
+    var target = state.ip.trim();
+    if (!target || state.scanning) return;
+    state.scanning = true; render();
+    try{
+      var res = await probe(target, TIMEOUT_MS);
+      state.log = [{ target: target, status: res.status, ms: res.ms, line: res.line }]
+                  .concat(state.log).slice(0, 50);
+    }catch(e){
+      state.log = [{ target: target, status: 'error', ms: 0 }].concat(state.log).slice(0, 50);
+    }
+    state.scanning = false; render();
+  }
+
+  async function fetchFromSource(){
+    state.updating = true; render();
+    try{
+      var res = await fetch(LIST_SRC, { cache:'no-store' });
+      if (!res.ok) throw new Error(String(res.status));
+      state.list = parseList(await res.text());
+      state.listState = 'ready';
+      try{ localStorage.setItem(LIST_CACHE_KEY, JSON.stringify(state.list)); }catch(e){}
+    }catch(e){
+      try{
+        var cached = localStorage.getItem(LIST_CACHE_KEY);
+        if (cached){ state.list = JSON.parse(cached); state.listState = 'cached'; }
+        else state.listState = 'error';
+      }catch(e2){ state.listState = 'error'; }
+    }
+    state.updating = false; render();
+  }
+
+  async function runTest(){
+    if (state.testing || state.list.length === 0) return;
+    state.testing = true; state.progress = 0; state.results = []; render();
+    var out = [];
+    for (var i = 0; i < state.list.length; i++){
+      var target = state.list[i], success = 0, msSum = 0, msCount = 0;
+      for (var j = 0; j < TESTS_PER_IP; j++){
+        try{
+          var r = await probe(target, TIMEOUT_MS);
+          if (r.status === 'open' || r.status === 'reachable'){ success++; msSum += r.ms; msCount++; }
+        }catch(e){}
+      }
+      out.push({ target: target, success: success, total: TESTS_PER_IP,
+                 avgMs: msCount ? Math.round(msSum/msCount) : 0 });
+      state.progress = out.length; state.results = out.slice(); render();
+    }
+    state.testing = false; render();
+  }
+
+  /* --------------------------- event wiring --------------------------- */
+  app.addEventListener('click', function(e){
+    var btn = e.target.closest('button');
+    if (!btn) return;
+    var act = btn.getAttribute('data-act');
+    if (act === 'mode-online'){ state.mode = 'online'; render(); }
+    else if (act === 'mode-offline'){ state.mode = 'offline'; render(); }
+    else if (act === 'tab-manual'){ state.tab = 'manual'; render(); }
+    else if (act === 'tab-sample'){ state.tab = 'sample'; render(); }
+    else if (act === 'scan'){ doScan(); }
+    else if (act === 'update'){ fetchFromSource(); }
+    else if (act === 'run'){ runTest(); }
+  });
+
+  app.addEventListener('input', function(e){
+    if (e.target.id === 'ip') state.ip = e.target.value;
+  });
+
+  app.addEventListener('keydown', function(e){
+    if (e.target.id === 'ip' && e.key === 'Enter') doScan();
+  });
+
+  /* ------------------------------- boot ------------------------------- */
+  try{
+    var cached = localStorage.getItem(LIST_CACHE_KEY);
+    if (cached){ state.list = JSON.parse(cached); state.listState = 'cached'; }
+    else throw new Error('no cache');
+  }catch(e){ fetchFromSource(); }
+
+  render();
+})();
+</script>
+</body>
+</html>
